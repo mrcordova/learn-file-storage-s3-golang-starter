@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -99,10 +104,21 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 
 	assetPath = filepath.Join(keyPrefix, assetPath)
+	outputPath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to process", err)
+		return
+	}
+	processedFile, err := os.Open(outputPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "couldn't open file", err)
+		return
+	}
+	defer processedFile.Close()
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 	Bucket: aws.String(cfg.s3Bucket),
 	Key: aws.String(assetPath),
-	Body: tempFile,
+	Body: processedFile,
 	ContentType: aws.String(mediaType),
 	})
 	if err != nil {
@@ -119,4 +135,59 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+func getVideoAspectRatio(filePath string) (string, error)  {
+	cmd := exec.Command("ffprobe", "-v","error", "-print_format","json", "-show_streams", filePath)
+
+	var out bytes.Buffer
+
+	type Stream struct {
+		Width int `json:"width"`
+		Height int `json:"height"`
+	}
+	type Response struct {
+		Streams []Stream `json:"streams"`
+	}
+
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	
+
+	response := Response{}
+	response.Streams = make([]Stream, 0)
+	err = json.Unmarshal(out.Bytes(), &response)
+	if err != nil {
+		return "", err
+	}
+	
+	aspectRatio := response.Streams[0].Width / response.Streams[0].Height
+	aspectRatioStr := ""
+	if aspectRatio == 0 {
+		aspectRatioStr = "9:16"
+	} else if aspectRatio == 1 {
+		aspectRatioStr = "16:9"
+	} else {
+		aspectRatioStr = "other"
+	}
+	return aspectRatioStr, nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputFilePath := fmt.Sprintf("%s.processing", filePath)
+	cmd := exec.Command("ffmpeg", "-i", filePath,  "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilePath)
+	var stderr strings.Builder
+	cmd.Stdout = &stderr
+	err := cmd.Run()
+
+	if err != nil {
+		fmt.Printf("command error: %s", &stderr)
+		return "", err
+	}
+
+	return outputFilePath, nil
 }
