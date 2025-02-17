@@ -5,6 +5,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -13,7 +14,8 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body,  1<<30)
+	const maxUpload = 1 << 30
+	r.Body = http.MaxBytesReader(w, r.Body,  maxUpload)
 	videoIDStr := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDStr)
 	if err != nil {
@@ -44,7 +46,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "video user is not the same", err)
 		return
 	}
-	// maxUpload := 1 << 30
+	
 
 	file, header, err := r.FormFile("video")
 	if err != nil {
@@ -64,7 +66,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	assetPath := getAssetPath(mediaType)
-	// assetDiskPath := cfg.getAssetDiskPath(assetPath)
 
 	tempFile, err := os.CreateTemp("", "tubley-upload.mp4")
 	if err != nil {
@@ -84,7 +85,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// fmt.Println(cfg.s3Region)
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	keyPrefix := "other"
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to get video aspect ratio", err)
+		return
+	}
+	if aspectRatio == "16:9" {
+		keyPrefix = "landscape"
+	} else if aspectRatio == "9:16" {
+		keyPrefix = "portrait"
+	} 
+
+
+	assetPath = filepath.Join(keyPrefix, assetPath)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 	Bucket: aws.String(cfg.s3Bucket),
 	Key: aws.String(assetPath),
